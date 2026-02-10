@@ -45,7 +45,7 @@ import {
   type CounterProviders,
   type DeployedCounterContract,
 } from './common-types';
-import { type Config, contractConfig } from './config';
+import { type Config, contractConfig, PROOF_SERVER_URL_POSTFIX } from './config';
 import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider';
 import { assertIsContractAddress, toHex } from '@midnight-ntwrk/midnight-js-utils';
 import { getNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
@@ -513,6 +513,35 @@ export const buildFreshWallet = async (config: Config): Promise<WalletContext> =
 export const configureProviders = async (ctx: WalletContext, config: Config) => {
   const walletAndMidnightProvider = await createWalletAndMidnightProvider(ctx);
   const zkConfigProvider = new NodeZkConfigProvider<CounterCircuits>(contractConfig.zkConfigPath);
+
+
+    // patch for proof server URL rewriting, while initializing the ProverClient
+    //   used by midnight-js-http-client-proof-provider. 
+    // 
+    // The ProverClient doesn't allow passing a custom URL parser or http client,
+    //   so we rewrite URLs globally to insert the required postfix for the Arkhia proof server.
+    // 
+    // This is needed because the proof server URL includes a path segment
+    //   with identifying information (e.g. /midnight/zkpaas/testnet/46634Y77zrsb1294Z72h9P02MN43d4N4)
+    //   that must be preserved on all requests
+    //   but the ProverClient expects just a base URL and appends its own path segments for different endpoints.
+
+    const originalURL = global.URL;
+    global.URL = class extends originalURL {
+      constructor(path: string, base?: string | undefined) {
+        path = path.replace(/^\/+/, PROOF_SERVER_URL_POSTFIX);
+        super(path, base);
+      }
+    } as any;
+
+    const proofProvider = httpClientProofProvider(config.proofServer, zkConfigProvider);
+    
+    // unpatch the global URL after initializing the ProverClient, to avoid affecting other parts of the code that use URL
+    // global.URL = originalURL;
+    // Note: unpatching disabled in proof-server 7.0.0, seems like URL rewriting
+    //  is required for the ProverClient to function correctly, even outside of initialization.
+    // This may be due to the ProverClient making requests with relative URLs that need the rewriting to work properly.
+
   return {
     privateStateProvider: levelPrivateStateProvider<typeof CounterPrivateStateId>({
       privateStateStoreName: contractConfig.privateStateStoreName,
@@ -520,7 +549,7 @@ export const configureProviders = async (ctx: WalletContext, config: Config) => 
     }),
     publicDataProvider: indexerPublicDataProvider(config.indexer, config.indexerWS),
     zkConfigProvider,
-    proofProvider: httpClientProofProvider(config.proofServer, zkConfigProvider),
+    proofProvider,
     walletProvider: walletAndMidnightProvider,
     midnightProvider: walletAndMidnightProvider,
   };
